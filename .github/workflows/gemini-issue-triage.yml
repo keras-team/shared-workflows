@@ -1,0 +1,303 @@
+name: 'Gemini Issue Triage (Reusable)'
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'Issue number to triage (optional, inferred from event if omitted)'
+        required: false
+        type: number
+      allowed_labels:
+        description: 'Comma-separated list of allowed repository labels'
+        required: false
+        type: string
+        default: 'backend:jax,backend:tensorflow,backend:torch,backend:OpenVino,Gemma,layers,python,dependencies,Duplicate,stale,stat:awaiting response from contributor,stat:awaiting keras-eng,Good first issue,keras-team-review-pending,stat:contributions welcome,wont-fix,user error,to investigate'
+      gemini_model:
+        description: 'Gemini model to use for triage analysis'
+        required: false
+        type: string
+        default: 'gemini-3.5-flash'
+      enable_auto_close:
+        description: 'Whether to allow auto-closing issues classified strictly as user_error'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      GEMINI_API:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GEMINI_CLI_TRUST_WORKSPACE: 'true'
+    steps:
+      - name: 'Get Issue Data'
+        id: 'get_issue_data'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          INPUT_ISSUE_NUMBER: '${{ inputs.issue_number }}'
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            let issueNumber = process.env.INPUT_ISSUE_NUMBER ? parseInt(process.env.INPUT_ISSUE_NUMBER) : null;
+            if (!issueNumber && context.payload.issue) {
+              issueNumber = context.payload.issue.number;
+            }
+            if (!issueNumber) {
+              core.setFailed('Could not determine issue number from event or inputs.');
+              return;
+            }
+
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+            });
+
+            core.setOutput('issue_number', issue.number);
+            core.setOutput('title', issue.title || '');
+            core.setOutput('body', issue.body || '');
+            core.setOutput('author', issue.user ? issue.user.login : '');
+            return issue;
+
+      - name: 'Checkout Caller Repository'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Filter Allowed Repository Labels'
+        id: 'get_labels'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CONFIG_ALLOWED_LABELS: '${{ inputs.allowed_labels }}'
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const { data: labels } = await github.rest.issues.listLabelsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const rawAllowed = process.env.CONFIG_ALLOWED_LABELS || '';
+            const allowedLabels = rawAllowed.split(',').map(l => l.trim()).filter(Boolean);
+
+            const repoLabelNames = labels.map(l => l.name);
+            const matchedLabels = repoLabelNames.filter(name => allowedLabels.includes(name));
+
+            core.info(`Configured allowed labels: ${allowedLabels.join(', ')}`);
+            core.info(`Matched repository labels: ${matchedLabels.join(', ')}`);
+
+            core.setOutput('available_labels', matchedLabels.join(', '));
+            return matchedLabels;
+
+      - name: 'Search Codebase for Context'
+        id: 'search_codebase'
+        env:
+          ISSUE_TITLE: '${{ steps.get_issue_data.outputs.title }}'
+          ISSUE_BODY: '${{ steps.get_issue_data.outputs.body }}'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+
+            const title = process.env.ISSUE_TITLE || '';
+            const body = process.env.ISSUE_BODY || '';
+            const searchTerms = (title + ' ' + body).split(/\W+/).filter(word => word.length > 3).slice(0, 5);
+
+            core.info(`Searching for terms: ${searchTerms.join(', ')}`);
+
+            let searchContext = '### Relevant Code Snippets\n\n';
+            let filesFound = new Set();
+
+            if (searchTerms.length > 0) {
+              try {
+                // Search inside the caller repo's source tree
+                const gitGrepOutput = execSync(`git grep -l "${searchTerms[0]}" || true`, { encoding: 'utf-8' });
+                const files = gitGrepOutput.split('\n').filter(Boolean).slice(0, 3);
+
+                for (const file of files) {
+                  filesFound.add(file);
+                  const content = fs.readFileSync(file, 'utf8');
+                  searchContext += `#### File: [${file}](file:///${file})\n\`\`\`python\n${content.split('\n').slice(0, 50).join('\n')}\n\`\`\`\n\n`;
+                }
+              } catch (e) {
+                core.warning(`Error running git grep: ${e.message}`);
+              }
+            }
+
+            if (filesFound.size === 0) {
+              searchContext += 'No specific code snippets found for these terms.\n';
+            }
+
+            core.setOutput('search_context', searchContext);
+
+      - name: 'Pre-create .gemini Directory'
+        run: mkdir -p ~/.gemini
+
+      - name: 'Run Gemini Issue Analysis & Response'
+        uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
+        id: 'gemini_issue_analysis'
+        env:
+          GITHUB_TOKEN: ''
+          ISSUE_TITLE: '${{ steps.get_issue_data.outputs.title }}'
+          ISSUE_BODY: '${{ steps.get_issue_data.outputs.body }}'
+          AVAILABLE_LABELS: '${{ steps.get_labels.outputs.available_labels }}'
+          SEARCH_CONTEXT: '${{ steps.search_codebase.outputs.search_context }}'
+        with:
+          gemini_api_key: '${{ secrets.GEMINI_API }}'
+          gemini_model: '${{ inputs.gemini_model }}'
+          settings: |-
+            {
+              "maxSessionTurns": 5,
+              "coreTools": [],
+              "telemetry": {
+                "enabled": false
+              }
+            }
+          prompt: |-
+            ## Role
+
+            You are an issue triage and response assistant for Keras. Your role is twofold:
+            1. Analyze the issue and determine all applicable labels based on the definitions provided.
+            2. Classify whether automated feedback or triage status is required.
+
+            ## Context
+            - Issue Title: ${{ env.ISSUE_TITLE }}
+            - Issue Body: ${{ env.ISSUE_BODY }}
+            - Available Labels: ${{ env.AVAILABLE_LABELS }}
+            - Codebase Search Context: ${{ env.SEARCH_CONTEXT }}
+
+            ## Steps
+            1. Select all labels that best match the issue from the Available Labels list.
+            2. Determine the triage reason:
+               - 'user_error': Issue is a clear usage question or user error where no code change in Keras is required.
+               - 'needs_info': A reproduction or more environment details are required to investigate.
+               - 'support': General support or discussion question.
+               - null: Valid bug report or feature request that requires team review/investigation (no automated canned comment needed).
+            3. Output your response in the JSON format specified below.
+
+            ## Output Format
+            Your output must be a valid JSON object with the following schema:
+            {
+              "labels_to_set": ["label-name"],
+              "triage_reason": "user_error" | "needs_info" | "support" | null,
+              "auto_close": true or false
+            }
+
+            ## Guidelines
+            - Output only the JSON object. Do not include any explanation or additional text before/after the JSON.
+            - Set `auto_close` to `true` ONLY if `triage_reason` is 'user_error' and no repository code changes are needed. Otherwise set `auto_close` to `false`.
+
+      - name: 'Apply Labels and Post Response'
+        if: |-
+          ${{ steps.gemini_issue_analysis.outputs.summary != '' }}
+        env:
+          ISSUE_NUMBER: '${{ steps.get_issue_data.outputs.issue_number }}'
+          ISSUE_AUTHOR: '${{ steps.get_issue_data.outputs.author }}'
+          LABELS_OUTPUT: '${{ steps.gemini_issue_analysis.outputs.summary }}'
+          ALLOWED_LABELS: '${{ steps.get_labels.outputs.available_labels }}'
+          ENABLE_AUTO_CLOSE: '${{ inputs.enable_auto_close }}'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const rawOutput = process.env.LABELS_OUTPUT;
+            const allowedLabelsEnv = process.env.ALLOWED_LABELS || '';
+            const ALLOWED_LABELS = allowedLabelsEnv.split(',').map(l => l.trim()).filter(Boolean);
+            const enableAutoClose = process.env.ENABLE_AUTO_CLOSE === 'true';
+
+            core.info(`Raw output from model: ${rawOutput}`);
+            core.info(`Allowed labels: ${ALLOWED_LABELS.join(', ')}`);
+
+            let parsed;
+            try {
+              parsed = JSON.parse(rawOutput);
+            } catch (e) {
+              const jsonMatch = rawOutput.match(/```json\s*([\s\S]*?)\s*```/) || rawOutput.match(/(\{[\s\S]*"labels_to_set"[\s\S]*\})/);
+              if (jsonMatch && jsonMatch[1]) {
+                try {
+                  parsed = JSON.parse(jsonMatch[1].trim());
+                } catch (innerErr) {
+                  core.error(`Failed to parse extracted JSON block: ${innerErr.message}`);
+                  core.setFailed(`Invalid model JSON output: ${rawOutput}`);
+                  return;
+                }
+              } else {
+                core.error(`Failed to parse LLM output as JSON: ${e.message}`);
+                core.setFailed(`Invalid model JSON output: ${rawOutput}`);
+                return;
+              }
+            }
+
+            // 1. Strict Label Allowlist Filtering (Prevents unauthorized label manipulation)
+            const requestedLabels = parsed.labels_to_set || [];
+            const labelsToAdd = requestedLabels.filter(label => ALLOWED_LABELS.includes(label));
+
+            if (requestedLabels.length !== labelsToAdd.length) {
+              const blocked = requestedLabels.filter(l => !ALLOWED_LABELS.includes(l));
+              core.warning(`Blocked unauthorized labels: ${blocked.join(', ')}`);
+            }
+
+            // 2. Static Comment Templates (Prevents arbitrary LLM comment injection)
+            const COMMENT_TEMPLATES = {
+              'user_error': '@${author} This issue appears to be a user error or has a suggested workaround that does not require code changes in the repository. As there is no actionable item for the team, this issue will be automatically closed.\n\nIf you believe this was done in error, please reopen the issue with additional details.',
+              'needs_info': '@${author} Please provide a minimal reproducible example and environment details so we can investigate this issue further.',
+              'support': '@${author} This repository is for bug reports and feature requests. For general support questions, please use our discussion forum or Discord.'
+            };
+
+            const issueNumber = parseInt(process.env.ISSUE_NUMBER);
+            const issueAuthor = process.env.ISSUE_AUTHOR || 'contributor';
+            const triageReason = parsed.triage_reason;
+
+            let responseBody = '';
+            if (triageReason && COMMENT_TEMPLATES[triageReason]) {
+              responseBody = COMMENT_TEMPLATES[triageReason].replace('${author}', issueAuthor);
+            } else {
+              core.info(`No automated comment posted (triage reason: ${triageReason}).`);
+            }
+
+            // 3. Restricted Auto-Close (Only allowed for user_error when enabled)
+            let autoClose = false;
+            if (enableAutoClose && parsed.auto_close && triageReason === 'user_error') {
+              autoClose = true;
+            }
+
+            // Execute GitHub Mutations
+            if (labelsToAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: labelsToAdd,
+              });
+              core.info(`Successfully added labels to #${issueNumber}: ${labelsToAdd.join(', ')}`);
+            }
+
+            if (responseBody) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: responseBody,
+              });
+              core.info(`Successfully posted automated response to #${issueNumber}`);
+            }
+
+            if (autoClose) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                state: 'closed',
+                state_reason: 'not_planned',
+              });
+              core.info(`Auto-closed issue #${issueNumber} as not_planned.`);
+            }

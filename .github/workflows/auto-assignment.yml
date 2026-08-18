@@ -1,0 +1,62 @@
+name: 'Auto-Assignment (Reusable)'
+
+on:
+  workflow_call:
+    inputs:
+      issue_assignees:
+        description: 'Comma-separated list of GitHub usernames to assign issues to on rotation'
+        required: false
+        type: string
+        default: 'maitry63,mrinalghoshh,dhantule'
+      pr_assignees:
+        description: 'Comma-separated list of GitHub usernames to assign PRs to on rotation'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  auto_assign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Auto-assign on rotation'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CONFIG_ISSUE_ASSIGNEES: '${{ inputs.issue_assignees }}'
+          CONFIG_PR_ASSIGNEES: '${{ inputs.pr_assignees }}'
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            let issueNumber;
+            let assigneesList = [];
+
+            const isIssue = Boolean(context.payload.issue && !context.payload.pull_request);
+            if (isIssue) {
+              const raw = process.env.CONFIG_ISSUE_ASSIGNEES || '';
+              assigneesList = raw.split(',').map(s => s.trim()).filter(Boolean);
+              issueNumber = context.payload.issue.number;
+            } else if (context.payload.pull_request || context.payload.number) {
+              const raw = process.env.CONFIG_PR_ASSIGNEES || '';
+              assigneesList = raw.split(',').map(s => s.trim()).filter(Boolean);
+              issueNumber = context.payload.pull_request ? context.payload.pull_request.number : context.payload.number;
+            }
+
+            core.info(`Assignee list for target #${issueNumber}: ${assigneesList.join(', ')}`);
+            if (!assigneesList.length) {
+              core.info('No assignees configured for this event type.');
+              return;
+            }
+
+            const selection = issueNumber % assigneesList.length;
+            const chosenAssignee = assigneesList[selection];
+
+            core.info(`Assigning #${issueNumber} to ${chosenAssignee}`);
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              assignees: [chosenAssignee],
+            });
