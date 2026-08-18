@@ -6,7 +6,7 @@ on:
       issue_number:
         description: 'Issue number to triage (optional, inferred from event if omitted)'
         required: false
-        type: number
+        type: string
       allowed_labels:
         description: 'Comma-separated list of allowed repository labels'
         required: false
@@ -45,15 +45,22 @@ jobs:
         with:
           github-token: '${{ secrets.GITHUB_TOKEN }}'
           script: |
-            let issueNumber = process.env.INPUT_ISSUE_NUMBER ? parseInt(process.env.INPUT_ISSUE_NUMBER) : null;
-            if (!issueNumber && context.payload.issue) {
+            let issueNumber = null;
+            const inputNum = process.env.INPUT_ISSUE_NUMBER;
+            if (inputNum && inputNum !== '0' && inputNum.trim() !== '') {
+              issueNumber = parseInt(inputNum.trim());
+            } else if (context.payload.inputs && context.payload.inputs.issue_number) {
+              issueNumber = parseInt(context.payload.inputs.issue_number);
+            } else if (context.payload.issue && context.payload.issue.number) {
               issueNumber = context.payload.issue.number;
             }
-            if (!issueNumber) {
+
+            if (!issueNumber || isNaN(issueNumber)) {
               core.setFailed('Could not determine issue number from event or inputs.');
               return;
             }
 
+            core.info(`Fetching data for issue #${issueNumber} in ${context.repo.owner}/${context.repo.repo}`);
             const { data: issue } = await github.rest.issues.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
