@@ -1,0 +1,24 @@
+name: 'Tests'
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    branches:
+      - 'main'
+
+permissions:
+  contents: 'read'
+
+jobs:
+  unit-tests:
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Check out repository'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Run unit tests'
+        run: node --test 'scripts/**/*.test.js'
