@@ -1,0 +1,47 @@
+name: 'PR Contributor Terms (Reusable)'
+
+on:
+  workflow_call:
+    inputs:
+      exempt_associations:
+        description: 'Comma-separated list of author associations to exempt from contributor agreement verification'
+        required: false
+        type: string
+        default: 'OWNER,MEMBER,COLLABORATOR'
+      exempt_users:
+        description: 'Comma-separated list of GitHub usernames/bots to exempt'
+        required: false
+        type: string
+        default: ''
+      required_terms:
+        description: 'Newline-separated list of required contributor agreement terms (leave empty for default Keras terms)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Check out shared workflows repo'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 'keras-team/shared-workflows'
+          persist-credentials: false
+          path: '.shared-workflows'
+
+      - name: 'Verify contributor agreement'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXEMPT_ASSOCIATIONS: '${{ inputs.exempt_associations }}'
+          EXEMPT_USERS: '${{ inputs.exempt_users }}'
+          REQUIRED_TERMS: '${{ inputs.required_terms }}'
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const verifyTerms = require('./.shared-workflows/scripts/verify-pr-contributor-terms.js');
+            await verifyTerms({ github, context, core });
