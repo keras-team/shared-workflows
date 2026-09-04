@@ -22,9 +22,69 @@ const DEFAULT_TERMS = [
   'I will work with the maintainers to push this PR forward until submission.'
 ];
 
+const COMMENT_MARKER = '<!-- pr-contributor-terms-check -->';
+
+/**
+ * Converts the PR to draft, or marks it ready for review, via the GraphQL API.
+ * (The REST API does not support toggling the draft state.)
+ *
+ * @param {!object} github - GitHub octokit client.
+ * @param {!object} core - Actions core library for logging.
+ * @param {!object} pr - Pull request payload (needs `node_id` and `number`).
+ * @param {boolean} toDraft - True to convert to draft, false to mark ready.
+ */
+async function setDraftState(github, core, pr, toDraft) {
+  const mutation = toDraft
+    ? `mutation($id: ID!) {
+        convertPullRequestToDraft(input: {pullRequestId: $id}) {
+          pullRequest { isDraft }
+        }
+      }`
+    : `mutation($id: ID!) {
+        markPullRequestReadyForReview(input: {pullRequestId: $id}) {
+          pullRequest { isDraft }
+        }
+      }`;
+  try {
+    await github.graphql(mutation, { id: pr.node_id });
+    core.info(
+      toDraft
+        ? `Converted PR #${pr.number} to draft.`
+        : `Marked PR #${pr.number} as ready for review.`
+    );
+  } catch (error) {
+    core.warning(
+      `Could not ${toDraft ? 'convert PR to draft' : 'mark PR ready for review'}: ${error.message}. ` +
+      `Ensure the workflow has 'contents: write' and 'pull-requests: write' permissions.`
+    );
+  }
+}
+
+/**
+ * Finds the sticky status comment previously posted by this check, if any.
+ *
+ * @param {!object} github - GitHub octokit client.
+ * @param {!object} context - GitHub actions context.
+ * @param {number} prNumber - Pull request number.
+ * @return {?object} The comment, or null if not found.
+ */
+async function findStickyComment(github, context, prNumber) {
+  const { data: comments } = await github.rest.issues.listComments({
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    issue_number: prNumber,
+    per_page: 100,
+  });
+  return comments.find(c => c.body && c.body.includes(COMMENT_MARKER)) || null;
+}
+
 /**
  * Verifies that the PR contributor agreement has been checked by external contributors,
  * while exempting repository maintainers, organization members, and bots.
+ *
+ * When terms are not accepted, the PR is converted to a draft and a sticky comment
+ * explains what is missing. Once all terms are accepted, a PR that this check had
+ * converted to draft is marked ready for review again.
  *
  * @param {!object} params
  * @param {!object} params.github - GitHub octokit client.
@@ -93,6 +153,37 @@ module.exports = async function verifyPrContributorTerms({ github, context, core
   }
 
   if (unchecked.length > 0) {
+    // Convert the PR to draft until all terms have been accepted.
+    if (!pr.draft) {
+      await setDraftState(github, core, pr, true);
+    }
+    const commentBody =
+      `${COMMENT_MARKER}\n` +
+      `⚠️ This PR has been converted to a **draft** because the following contributor ` +
+      `agreement terms have not been accepted:\n\n` +
+      unchecked.map(t => `- [ ] ${t}`).join('\n') +
+      `\n\nPlease check all boxes in the Contributor Agreement section of the PR ` +
+      `description, then mark the PR as ready for review.`;
+    try {
+      const existing = await findStickyComment(github, context, prNumber);
+      if (existing) {
+        await github.rest.issues.updateComment({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          comment_id: existing.id,
+          body: commentBody,
+        });
+      } else {
+        await github.rest.issues.createComment({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          issue_number: prNumber,
+          body: commentBody,
+        });
+      }
+    } catch (error) {
+      core.warning(`Could not post status comment: ${error.message}`);
+    }
     core.setFailed(
       `The following contributor agreement terms have not been accepted:\n` +
       unchecked.map(t => `  - ${t}`).join('\n') +
@@ -100,5 +191,23 @@ module.exports = async function verifyPrContributorTerms({ github, context, core
     );
   } else {
     core.info('All contributor agreement terms accepted.');
+    // Only touch the PR if this check previously flagged it (sticky comment present),
+    // so a PR the author intentionally keeps as draft is left alone.
+    try {
+      const existing = await findStickyComment(github, context, prNumber);
+      if (existing) {
+        await github.rest.issues.updateComment({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          comment_id: existing.id,
+          body: `${COMMENT_MARKER}\n✅ All contributor agreement terms have been accepted. Thank you!`,
+        });
+        if (pr.draft) {
+          await setDraftState(github, core, pr, false);
+        }
+      }
+    } catch (error) {
+      core.warning(`Could not update status comment: ${error.message}`);
+    }
   }
 };

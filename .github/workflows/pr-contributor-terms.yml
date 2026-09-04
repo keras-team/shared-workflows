@@ -19,9 +19,11 @@ on:
         type: string
         default: ''
 
+# 'contents: write' and 'pull-requests: write' are required to convert the PR
+# to a draft and post a status comment when the terms are not accepted.
 permissions:
-  contents: read
-  pull-requests: read
+  contents: write
+  pull-requests: write
 
 jobs:
   verify:
