@@ -11,7 +11,7 @@ on:
         description: 'Comma-separated list of allowed repository labels'
         required: false
         type: string
-        default: 'backend:jax,backend:tensorflow,backend:torch,backend:OpenVino,Gemma,layers,python,dependencies,Duplicate,stale,stat:awaiting response from contributor,stat:awaiting keras-eng,Good first issue,keras-team-review-pending,stat:contributions welcome,wont-fix,user error,to investigate'
+        default: 'backend:jax,backend:tensorflow,backend:torch,backend:OpenVino,Gemma,layers,python,dependencies,Duplicate,stale,stat:awaiting response from contributor,Good first issue,gTech-team-review-pending,stat:contributions welcome,wont-fix,user error,to investigate'
       gemini_model:
         description: 'Gemini model to use for triage analysis'
         required: false
@@ -191,6 +191,14 @@ jobs:
                - null: Valid bug report or feature request that requires team review/investigation (no automated canned comment needed).
             3. Output your response in the JSON format specified below.
 
+            ## Label Guidelines
+            - Apply `gTech-team-review-pending` to ALL valid bug reports, feature requests, AND support
+              issues (i.e., when triage_reason is null or 'support'). The gTech team reviews all these
+              issues first and manually escalates to the eng team where needed.
+            - Do NOT apply `gTech-team-review-pending` for user_error or needs_info issues.
+            - NEVER apply `keras-team-review-pending` or `stat:awaiting keras-eng`. These are
+              reserved for human maintainers only and must never be applied automatically.
+
             ## Output Format
             Your output must be a valid JSON object with the following schema:
             {
@@ -278,6 +286,7 @@ jobs:
             }
 
             // Execute GitHub Mutations
+
             if (labelsToAdd.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
