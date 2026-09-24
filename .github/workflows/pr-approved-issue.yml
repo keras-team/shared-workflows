@@ -1,0 +1,42 @@
+name: 'PR Approved Issue Check (Reusable)'
+# Every PR from an external contributor is converted to a draft if its
+# description does not link an approved issue assigned to the PR author.
+# Repository owners, org members, collaborators and bots bypass this check.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref (branch, tag, or commit SHA) of shared-workflows to check out'
+        required: false
+        type: string
+        default: 'main'
+
+permissions:
+  contents: write # Needed, with pull-requests: write, to toggle draft state.
+  issues: read
+  pull-requests: write
+
+jobs:
+  approved-issue:
+    # Bypass maintainers, collaborators and bots (e.g. dependabot).
+    if: >-
+      github.event.pull_request.user.type != 'Bot' &&
+      !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Check out shared workflows repo'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 'keras-team/shared-workflows'
+          ref: '${{ inputs.ref }}'
+          persist-credentials: false
+          path: '.shared-workflows'
+
+      - name: 'Check PR approved issue'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const prApprovedIssue = require('./.shared-workflows/scripts/pr-approved-issue.js');
+            await prApprovedIssue({ github, context, core });
