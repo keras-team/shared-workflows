@@ -34,16 +34,28 @@ describe('verifyPrContributorTerms', () => {
   function createHarness({ pr, env = {}, context = null }) {
     let failedMessage = null;
     const infoMessages = [];
+    const graphqlCalls = [];
+    const createdComments = [];
 
     const core = {
       info: (msg) => infoMessages.push(msg),
+      warning: () => {},
       setFailed: (msg) => { failedMessage = msg; },
     };
 
     const github = {
+      graphql: async (mutation, variables) => {
+        graphqlCalls.push({ mutation, variables });
+        return {};
+      },
       rest: {
         pulls: {
           get: async () => ({ data: pr }),
+        },
+        issues: {
+          listComments: async () => ({ data: [] }),
+          createComment: async (params) => { createdComments.push(params); return { data: params }; },
+          updateComment: async (params) => ({ data: params }),
         },
       },
     };
@@ -67,6 +79,8 @@ describe('verifyPrContributorTerms', () => {
       }),
       getFailedMessage: () => failedMessage,
       getInfoMessages: () => infoMessages,
+      getGraphqlCalls: () => graphqlCalls,
+      getCreatedComments: () => createdComments,
     };
   }
 
@@ -228,5 +242,30 @@ My PR
     assert.notStrictEqual(failedMsg, null);
     assert.ok(failedMsg.includes('Custom term 2'));
     assert.ok(!failedMsg.includes('Custom term 1'));
+  });
+
+  it('converts the PR to draft and posts a comment when terms are not accepted', async () => {
+    const harness = createHarness({
+      pr: {
+        number: 100,
+        node_id: 'PR_node123',
+        draft: false,
+        author_association: 'NONE',
+        user: { login: 'contributor', type: 'User' },
+        body: 'No checkboxes here',
+      },
+    });
+
+    await harness.run();
+    assert.notStrictEqual(harness.getFailedMessage(), null);
+
+    const graphqlCalls = harness.getGraphqlCalls();
+    assert.strictEqual(graphqlCalls.length, 1);
+    assert.ok(graphqlCalls[0].mutation.includes('convertPullRequestToDraft'));
+    assert.strictEqual(graphqlCalls[0].variables.id, 'PR_node123');
+
+    const created = harness.getCreatedComments();
+    assert.strictEqual(created.length, 1);
+    assert.ok(created[0].body.includes('converted to a **draft**'));
   });
 });
