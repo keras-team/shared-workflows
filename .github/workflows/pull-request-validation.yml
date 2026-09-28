@@ -1,4 +1,4 @@
-name: 'PR Approved Issue Check (Reusable)'
+name: 'Pull Request Validation (Reusable)'
 # Every PR from an external contributor is converted to a draft if its
 # description does not link an approved issue assigned to the PR author.
 # Repository owners, org members, collaborators and bots bypass this check.

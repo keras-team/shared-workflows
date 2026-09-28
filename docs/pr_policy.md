@@ -22,7 +22,7 @@ To keep review bandwidth focused on high-leverage improvements and prevent dupli
 
 ---
 
-## Automated Enforcement (`pr-approved-issue`)
+## Automated Enforcement (`pull-request-validation`)
 
 Our automated workflow checks every pull request from external contributors when a PR is `opened`, `edited`, `reopened`, or marked `ready_for_review`:
 
