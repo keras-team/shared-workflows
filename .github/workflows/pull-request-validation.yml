@@ -1,4 +1,4 @@
-name: 'PR Approved Issue Check (Reusable)'
+name: 'Pull Request Validation (Reusable)'
 # Every PR from an external contributor is converted to a draft if its
 # description does not link an approved issue assigned to the PR author.
 # Repository owners, org members, collaborators and bots bypass this check.
@@ -7,10 +7,10 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: 'Git ref (branch, tag, or commit SHA) of shared-workflows to check out'
+        description: 'Git ref (branch, tag, or commit SHA) of shared-workflows to check out (defaults to job.workflow_sha)'
         required: false
         type: string
-        default: 'main'
+        default: ''
 
 permissions:
   contents: write # Needed, with pull-requests: write, to toggle draft state.
@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: 'keras-team/shared-workflows'
-          ref: '${{ inputs.ref }}'
+          ref: '${{ inputs.ref || job.workflow_sha }}'
           persist-credentials: false
           path: '.shared-workflows'
 
