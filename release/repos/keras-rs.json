@@ -1,0 +1,17 @@
+{
+  "enabled": false,
+  "github_repo": "keras-team/keras-rs",
+  "default_branch": "main",
+  "release_branch_pattern": "^r(\\d+)\\.(\\d+)$",
+  "tag_prefix": "v",
+  "version_files": ["keras_rs/src/version.py"],
+  "packages": ["keras-rs"],
+  "import_names": ["keras_rs"],
+  "build_setup_command": "pip install -r requirements.txt build",
+  "build_command": "python pip_build.py",
+  "dist_dirs": ["dist/"],
+  "dev_suffix_on_master": ".dev0",
+  "smoke_snippet": "import keras_rs; print(keras_rs.__version__)",
+  "backends": ["tensorflow", "jax", "torch"],
+  "legacy_publish_workflow": "publish-to-pypi.yml"
+}

@@ -1,0 +1,257 @@
+name: 'Release'
+# Release panel. One button for every Keras repo: each run detects the next
+# step for the chosen repo and release branch (prepare, continue, publish,
+# fast-path, ...) and does it with the release App's token. The bot never
+# merges a PR. When a non-draft release exists afterwards, `dispatch` starts
+# publish.yml, which uploads to PyPI. See RELEASE_PROCESS.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Which repo to release (must be enabled in release/repos/).'
+        required: true
+        type: choice
+        options:
+          - 'keras'
+          - 'keras-hub'
+          - 'keras-rs'
+          - 'kinetic'
+      channel:
+        description: 'dev = pre-release X.Y.Z.devN (GitHub pre-release); stable = final release.'
+        required: true
+        type: choice
+        options:
+          - 'dev'
+          - 'stable'
+      kind:
+        description: 'major = new X.Y line on a release branch (patch component 0); patch = X.Y.Z fix on an existing release branch.'
+        required: true
+        type: choice
+        options:
+          - 'major'
+          - 'patch'
+      release_branch:
+        description: 'Release branch, e.g. r0.33. Always required; used for the same-branch lock.'
+        required: true
+        type: string
+      commit_sha:
+        description: 'Major with a new branch only: the master commit to cut the branch from.'
+        required: false
+        type: string
+        default: ''
+      version:
+        description: 'Optional. Leave blank to use the computed version (the dry run shows it). Type one only to resume or re-publish a specific version.'
+        required: false
+        type: string
+        default: ''
+      cherry_picks:
+        description: 'Master PR numbers (recommended, e.g. #3101) or commit SHAs, any order; applied in master merge order. Allowed for patch, and for major when the release branch already exists (e.g. fixes before X.Y.0).'
+        required: false
+        type: string
+        default: ''
+      bump_master:
+        description: 'Also open a PR bumping master to the next dev version.'
+        required: false
+        type: boolean
+        default: false
+      release_mode:
+        description: 'auto: after you merge the version PR and run the panel again, tags, publishes the GitHub release and uploads to PyPI in one go. draft: creates a draft release with notes for you to review (no tag yet); run the panel again to publish, which creates the tag and uploads. The bot never merges the PR in either mode.'
+        required: true
+        type: choice
+        options:
+          - 'draft'
+          - 'auto'
+      override_generated_tests:
+        description: 'Upload even if the Gemini-generated tests fail (e.g. a wrong generated test or a Gemini outage). The smoke install/import test always blocks.'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Show what would happen and change nothing. Untick to act.'
+        required: false
+        type: boolean
+        default: true
+
+# Parsed field by field by the same-branch run lock (scripts/release/lib/lock.js).
+run-name: "release ${{ inputs.repository }} ${{ inputs.release_branch }} ${{ inputs.kind }} ${{ inputs.version || 'auto' }}"
+
+permissions:
+  contents: 'read'
+
+# Inputs reach scripts only through the environment, never as ${{ }} inside
+# run: or script:.
+env:
+  RELEASE_REPOSITORY: '${{ inputs.repository }}'
+  RELEASE_CHANNEL: '${{ inputs.channel }}'
+  RELEASE_KIND: '${{ inputs.kind }}'
+  RELEASE_BRANCH: '${{ inputs.release_branch }}'
+  RELEASE_COMMIT_SHA: '${{ inputs.commit_sha }}'
+  RELEASE_VERSION: '${{ inputs.version }}'
+  RELEASE_CHERRY_PICKS: '${{ inputs.cherry_picks }}'
+  RELEASE_BUMP_MASTER: '${{ inputs.bump_master }}'
+  RELEASE_MODE: '${{ inputs.release_mode }}'
+  RELEASE_OVERRIDE_GENERATED_TESTS: '${{ inputs.override_generated_tests }}'
+  RELEASE_DRY_RUN: '${{ inputs.dry_run }}'
+  RELEASE_APP_SLUG: '${{ vars.RELEASE_APP_SLUG }}'
+
+jobs:
+  plan:
+    # No secrets. Validates inputs, refuses any ref but main, and checks the
+    # active-run signal of the same-branch lock.
+    runs-on: 'ubuntu-latest'
+    permissions:
+      actions: 'read'
+      contents: 'read'
+    outputs:
+      target_owner: '${{ steps.plan.outputs.target_owner }}'
+      target_name: '${{ steps.plan.outputs.target_name }}'
+    steps:
+      - name: 'Check out shared-workflows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Validate inputs and check the run lock'
+        id: 'plan'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { main } = require('./scripts/release/plan.js');
+            await main({ github, context, core, env: process.env });
+
+  act:
+    # No job-level concurrency on purpose: a second click must be refused by
+    # the run lock, not queued or silently cancelled.
+    needs: 'plan'
+    runs-on: 'ubuntu-latest'
+    environment: 'release'
+    permissions:
+      contents: 'read'
+    outputs:
+      published: '${{ steps.act.outputs.published }}'
+      tag: '${{ steps.act.outputs.tag }}'
+    steps:
+      - name: 'Refuse re-runs'
+        # "Re-run failed jobs" restarts here and skips the plan job's run lock.
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            echo "::error::Re-runs are refused because they skip the run lock in the plan job. Start a new panel run; it resumes where this one stopped."
+            exit 1
+          fi
+
+      - name: 'Check out shared-workflows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Mint App token for the target repo'
+        id: 'app-token'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: '${{ secrets.RELEASE_APP_CLIENT_ID }}'
+          private-key: '${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
+          owner: '${{ needs.plan.outputs.target_owner }}'
+          repositories: '${{ needs.plan.outputs.target_name }}'
+          # contents: write on dry runs too: GitHub lists draft releases only
+          # to callers with push access, and the draft lock needs them.
+          permission-contents: 'write'
+          permission-pull-requests: "${{ inputs.dry_run && 'read' || 'write' }}"
+          # `workflows` has no read level; dry runs leave it out entirely.
+          permission-workflows: "${{ !inputs.dry_run && 'write' || '' }}"
+          permission-actions: 'read'
+          permission-metadata: 'read'
+
+      - name: 'Detect and run the release step'
+        id: 'act'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_TARGET_OWNER: '${{ needs.plan.outputs.target_owner }}'
+          RELEASE_TARGET_NAME: '${{ needs.plan.outputs.target_name }}'
+          RELEASE_TRIGGERING_ACTOR: '${{ github.triggering_actor }}'
+          RELEASE_APP_TOKEN: '${{ steps.app-token.outputs.token }}'
+        with:
+          github-token: '${{ steps.app-token.outputs.token }}'
+          script: |
+            const { main } = require('./scripts/release/act.js');
+            await main({ github, context, core, env: process.env });
+
+  dispatch:
+    needs: 'act'
+    if: inputs.dry_run == false && needs.act.outputs.published == 'true'
+    runs-on: 'ubuntu-latest'
+    environment: 'release'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Refuse re-runs'
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            echo "::error::Re-runs are refused because they skip the run lock in the plan job. Start a new panel run; it resumes where this one stopped."
+            exit 1
+          fi
+
+      - name: 'Check out shared-workflows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Mint App token for shared-workflows (actions: write only)'
+        id: 'app-token'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: '${{ secrets.RELEASE_APP_CLIENT_ID }}'
+          private-key: '${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
+          owner: '${{ github.repository_owner }}'
+          repositories: 'shared-workflows'
+          permission-actions: 'write'
+
+      - name: 'Dispatch publish.yml'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_TAG: '${{ needs.act.outputs.tag }}'
+          RELEASE_TRIGGERING_ACTOR: '${{ github.triggering_actor }}'
+        with:
+          github-token: '${{ steps.app-token.outputs.token }}'
+          script: |
+            const { main } = require('./scripts/release/dispatch.js');
+            await main({ github, context, core, env: process.env });
+
+  report:
+    # No secrets. The act job's own summary lists the planned or taken actions.
+    needs:
+      - 'plan'
+      - 'act'
+      - 'dispatch'
+    if: always()
+    runs-on: 'ubuntu-latest'
+    permissions: {}
+    steps:
+      - name: 'Write run report'
+        env:
+          PLAN_RESULT: '${{ needs.plan.result }}'
+          ACT_RESULT: '${{ needs.act.result }}'
+          DISPATCH_RESULT: '${{ needs.dispatch.result }}'
+          PUBLISHED: '${{ needs.act.outputs.published }}'
+          TAG: '${{ needs.act.outputs.tag }}'
+        run: |
+          publish_runs="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/publish.yml"
+          {
+            echo "## Release run report"
+            echo ""
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| plan | ${PLAN_RESULT} |"
+            echo "| act | ${ACT_RESULT} |"
+            echo "| dispatch | ${DISPATCH_RESULT} |"
+            echo ""
+            echo "Repository: \`${RELEASE_REPOSITORY}\`. Dry run: \`${RELEASE_DRY_RUN}\`."
+            echo "The planned or taken actions are in the act job summary above."
+            if [ "$PUBLISHED" = "true" ] && [ "$DISPATCH_RESULT" = "success" ]; then
+              echo ""
+              echo "PyPI upload started: ${publish_runs} (run titled \`publish ${RELEASE_REPOSITORY} ${TAG}\`). Digests and override use are reported there."
+            elif [ "$PUBLISHED" = "true" ]; then
+              echo ""
+              echo "A release exists for \`${TAG}\` but publish.yml was not dispatched. Run the panel again with version set to this release's version to re-publish."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
