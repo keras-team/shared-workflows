@@ -26,7 +26,7 @@ To keep review bandwidth focused on high-leverage improvements and prevent dupli
 
 Our automated workflow checks every pull request from external contributors when a PR is `opened`, `edited`, `reopened`, or marked `ready_for_review`:
 
-- **Who is checked**: All external contributors (`FIRST_TIME_CONTRIBUTOR`, `CONTRIBUTOR`, `NONE`). Repository owners (`OWNER`), organization members (`MEMBER`), collaborators (`COLLABORATOR`), and bots (`Bot` / `[bot]`) are exempt.
+- **Who is checked**: All external contributors (`FIRST_TIME_CONTRIBUTOR`, `CONTRIBUTOR`, `NONE`). Repository owners (`OWNER`), organization members (`MEMBER`, whether public or private), collaborators (`COLLABORATOR`, whether granted directly or through a team), and bots (`Bot` / `[bot]`) are exempt.
 - **How issues are matched**:
   - The workflow strips HTML comments (`<!-- ... -->`) from the PR description and scans for issue references belonging to the same repository (`#xxx`, `owner/repo#xxx`, or `https://github.com/owner/repo/issues/xxx`).
   - Pull request numbers are ignored — the linked number must be an **issue** in the repository, and your GitHub username must be in the issue's **Assignees** list.

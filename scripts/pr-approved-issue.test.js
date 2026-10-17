@@ -28,12 +28,15 @@ describe('prApprovedIssue', () => {
     pr = null,
     payloadPr = undefined,
     issuesByNumber = {},
+    collaborators = new Set(),
+    collaboratorError = null,
     graphqlError = null,
   }) {
     const infoMessages = [];
     const warningMessages = [];
     let failedMessage = null;
     const fetchedIssues = [];
+    const collaboratorLookups = [];
     const graphqlCalls = [];
     const createdComments = [];
 
@@ -49,6 +52,17 @@ describe('prApprovedIssue', () => {
       rest: {
         pulls: {
           get: async () => ({ data: pr }),
+        },
+        repos: {
+          checkCollaborator: async ({ username }) => {
+            collaboratorLookups.push(username);
+            if (collaboratorError) {
+              throw collaboratorError;
+            }
+            if (!collaborators.has(username)) {
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            }
+          },
         },
         issues: {
           get: async ({ issue_number }) => {
@@ -86,6 +100,7 @@ describe('prApprovedIssue', () => {
       getWarningMessages: () => warningMessages,
       getFailedMessage: () => failedMessage,
       getFetchedIssues: () => fetchedIssues,
+      getCollaboratorLookups: () => collaboratorLookups,
       getGraphqlCalls: () => graphqlCalls,
       getCreatedComments: () => createdComments,
     };
@@ -120,7 +135,91 @@ describe('prApprovedIssue', () => {
       assert.strictEqual(harness.getFailedMessage(), null);
       assert.strictEqual(harness.getGraphqlCalls().length, 0);
       assert.strictEqual(harness.getCreatedComments().length, 0);
+      // The association fast path returns before the collaborator lookup.
+      assert.deepStrictEqual(harness.getCollaboratorLookups(), []);
     }
+  });
+
+  it('skips repository collaborators (including private org and team members) even when author_association is not bypassed', async () => {
+    // A private org member whose access comes through the org or a team is
+    // reported as CONTRIBUTOR (or NONE) in the event payload, not MEMBER,
+    // regardless of whether their role is admin, maintain, write, triage, or
+    // org-default read. `checkCollaborator` returns 204 for all of them.
+    for (const association of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      const harness = createHarness({
+        action: 'opened',
+        pr: {
+          number: 20,
+          node_id: 'PR_20',
+          draft: false,
+          author_association: association,
+          user: { login: 'private-member', type: 'User' },
+          body: 'No issue link needed',
+        },
+        collaborators: new Set(['private-member']),
+      });
+      await harness.run();
+      assert.strictEqual(harness.getFailedMessage(), null);
+      assert.strictEqual(harness.getGraphqlCalls().length, 0);
+      assert.strictEqual(harness.getCreatedComments().length, 0);
+      assert.deepStrictEqual(harness.getCollaboratorLookups(), ['private-member']);
+      assert.ok(
+        harness
+          .getInfoMessages()
+          .includes('Skipping #20: private-member is a collaborator on keras-team/keras-hub.')
+      );
+    }
+  });
+
+  it('still runs the check for non-collaborators (404) without emitting a warning', async () => {
+    const harness = createHarness({
+      action: 'opened',
+      pr: {
+        number: 30,
+        node_id: 'PR_30',
+        draft: false,
+        author_association: 'CONTRIBUTOR',
+        user: { login: 'external-dev', type: 'User' },
+        body: 'Here is my new feature.',
+      },
+    });
+    await harness.run();
+    assert.deepStrictEqual(harness.getCollaboratorLookups(), ['external-dev']);
+    // A 404 is the expected non-collaborator path and must not warn.
+    assert.strictEqual(harness.getWarningMessages().length, 0);
+    assert.strictEqual(harness.getGraphqlCalls().length, 1);
+    assert.strictEqual(harness.getCreatedComments().length, 1);
+    assert.strictEqual(
+      harness.getFailedMessage(),
+      'No approved issue assigned to external-dev is linked in #30.'
+    );
+  });
+
+  it('warns but still runs the check when the collaborator lookup fails for a non-404 reason', async () => {
+    const harness = createHarness({
+      action: 'opened',
+      pr: {
+        number: 31,
+        node_id: 'PR_31',
+        draft: false,
+        author_association: 'CONTRIBUTOR',
+        user: { login: 'external-dev', type: 'User' },
+        body: 'Here is my new feature.',
+      },
+      collaboratorError: Object.assign(new Error('Forbidden'), { status: 403 }),
+    });
+
+    await harness.run();
+
+    assert.strictEqual(harness.getWarningMessages().length, 1);
+    assert.ok(
+      harness
+        .getWarningMessages()[0]
+        .includes('Could not check collaborator status for external-dev: Forbidden')
+    );
+    assert.strictEqual(harness.getGraphqlCalls().length, 1);
+    assert.strictEqual(harness.getCreatedComments().length, 1);
+    assert.notStrictEqual(harness.getFailedMessage(), null);
   });
 
   it('fetches live PR state via pulls.get instead of relying on frozen event payload when re-run', async () => {

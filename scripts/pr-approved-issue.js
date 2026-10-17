@@ -26,7 +26,10 @@
  * - When the check fails: converts non-draft PRs to draft, posts a comment (on
  *   `opened` or when converting to draft), and marks the check as failed.
  *
- * Maintainers, collaborators and bots are skipped by the workflow `if:`.
+ * Maintainers, collaborators and bots are skipped by the workflow `if:`. All
+ * repository collaborators (including private org members and team members) are
+ * also skipped here, because the event payload's `author_association` only
+ * reports `MEMBER` when the org membership is public.
  */
 
 const POLICY_DOC_URL =
@@ -63,6 +66,14 @@ module.exports = async function prApprovedIssue({ github, context, core }) {
     BYPASS_ASSOCIATIONS.includes(pr.author_association)
   ) {
     core.info(`Skipping #${pr.number}: ${author} is ${pr.author_association}.`);
+    return;
+  }
+
+  // `author_association` only reports MEMBER when the org membership is
+  // public. Private org members whose access comes through the org or a team
+  // show up as CONTRIBUTOR, so check collaborator membership directly.
+  if (await isCollaborator(github, core, owner, repo, author)) {
+    core.info(`Skipping #${pr.number}: ${author} is a collaborator on ${owner}/${repo}.`);
     return;
   }
 
@@ -146,6 +157,26 @@ function findIssueNumbers(body, owner, repo) {
     }
   }
   return [...numbers];
+}
+
+/**
+ * True when `username` is a collaborator on the repo (204), including via
+ * organization or team membership at any role (admin, maintain, write, triage,
+ * or org-default read). External contributors return 404.
+ */
+async function isCollaborator(github, core, owner, repo, username) {
+  try {
+    await github.rest.repos.checkCollaborator({ owner, repo, username });
+    return true;
+  } catch (err) {
+    const message = `Could not check collaborator status for ${username}: ${err.message}`;
+    if (err.status === 404) {
+      core.info(message);
+    } else {
+      core.warning(message);
+    }
+    return false;
+  }
 }
 
 async function convertToDraft(github, core, pr) {
