@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: ''
+      ref:
+        description: 'Git ref (branch, tag, or commit SHA) of shared-workflows to check out (defaults to job.workflow_sha)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -31,6 +36,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: 'keras-team/shared-workflows'
+          ref: '${{ inputs.ref || job.workflow_sha }}'
           persist-credentials: false
           path: '.shared-workflows'
 
