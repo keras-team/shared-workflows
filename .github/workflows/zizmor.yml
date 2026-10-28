@@ -1,0 +1,41 @@
+name: 'Zizmor (Reusable)'
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: 'Path or directory within the repository to scan with zizmor'
+        required: false
+        type: string
+        default: '.github'
+      extra_args:
+        description: 'Additional CLI flags to pass to zizmor'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: 'GitHub Actions Security Analysis'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout code'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Install uv dependencies'
+        # zizmor: ignore[impostor-commit, mismatched-version-comment]
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: 'Run zizmor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TARGET: ${{ inputs.target }}
+          INPUT_EXTRA_ARGS: ${{ inputs.extra_args }}
+        run: |
+          read -r -a extra <<< "${INPUT_EXTRA_ARGS}"
+          uvx zizmor --format=github "${extra[@]}" "${INPUT_TARGET}"
