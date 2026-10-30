@@ -1,0 +1,133 @@
+name: 'Stale Issues and PRs (Reusable)'
+
+on:
+  workflow_call:
+    inputs:
+      operations_per_run:
+        description: 'Maximum number of operations per run'
+        required: false
+        type: number
+        default: 500
+      stale_label:
+        description: 'Label to apply to stale issues and PRs'
+        required: false
+        type: string
+        default: 'stale'
+      awaiting_response_label:
+        description: 'Label filtering issues awaiting response from contributor'
+        required: false
+        type: string
+        default: 'stat:awaiting response from contributor'
+      days_before_issue_stale:
+        description: 'Idle days before marking an awaiting-response issue stale'
+        required: false
+        type: number
+        default: 14
+      days_before_issue_close:
+        description: 'Idle days after stale before closing an awaiting-response issue'
+        required: false
+        type: number
+        default: 14
+      stale_issue_message:
+        description: 'Message posted when an awaiting-response issue is marked stale'
+        required: false
+        type: string
+        default: >-
+          This issue is stale because it has been open for 14 days with no activity.
+          It will be closed if no further activity occurs. Thank you.
+      close_issue_message:
+        description: 'Message posted when an awaiting-response issue is closed as stale'
+        required: false
+        type: string
+        default: >-
+          This issue was closed because it has been inactive for 28 days.
+          Please reopen if you'd like to work on this further.
+      days_before_pr_stale:
+        description: 'Idle days before marking a PR stale'
+        required: false
+        type: number
+        default: 7
+      days_before_pr_close:
+        description: 'Idle days after stale before closing a PR'
+        required: false
+        type: number
+        default: 7
+      stale_pr_message:
+        description: 'Message posted when a PR is marked stale'
+        required: false
+        type: string
+        default: 'This PR is stale because it has been open for 7 days with no activity. It will be closed in 7 days if no further activity occurs. Thank you.'
+      close_pr_message:
+        description: 'Message posted when a PR is closed as stale'
+        required: false
+        type: string
+        default: "This PR was closed because it has been inactive for 14 days. Please reopen if you'd like to work on this further."
+      contribution_labels:
+        description: 'Comma-separated labels filtering contribution-welcome issues'
+        required: false
+        type: string
+        default: 'stat:contributions welcome,good first issue'
+      days_before_contribution_issue_stale:
+        description: 'Idle days before marking a contribution-welcome issue stale'
+        required: false
+        type: number
+        default: 180
+      days_before_contribution_issue_close:
+        description: 'Idle days after stale before closing a contribution-welcome issue'
+        required: false
+        type: number
+        default: 365
+      stale_contribution_issue_message:
+        description: 'Message posted when a contribution-welcome issue is marked stale'
+        required: false
+        type: string
+        default: >-
+          This issue is stale because it has been open for 180 days with no activity.
+          It will be closed if no further activity occurs. Thank you.
+      close_contribution_issue_message:
+        description: 'Message posted when a contribution-welcome issue is closed as stale'
+        required: false
+        type: string
+        default: 'This issue was closed because it has been inactive for more than 1 year.'
+
+permissions:
+  actions: write # actions/stale persists its state in the Actions cache.
+  issues: write
+  pull-requests: write
+
+jobs:
+  close-issues:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Awaiting response issues'
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          operations-per-run: ${{ inputs.operations_per_run }}
+          days-before-issue-stale: ${{ inputs.days_before_issue_stale }}
+          days-before-issue-close: ${{ inputs.days_before_issue_close }}
+          stale-issue-label: ${{ inputs.stale_label }}
+          close-issue-reason: completed
+          only-labels: ${{ inputs.awaiting_response_label }}
+          stale-issue-message: ${{ inputs.stale_issue_message }}
+          labels-to-remove-when-unstale: ${{ inputs.awaiting_response_label }}
+          close-issue-message: ${{ inputs.close_issue_message }}
+          days-before-pr-stale: ${{ inputs.days_before_pr_stale }}
+          days-before-pr-close: ${{ inputs.days_before_pr_close }}
+          stale-pr-message: ${{ inputs.stale_pr_message }}
+          close-pr-message: ${{ inputs.close_pr_message }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Contribution issues'
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          operations-per-run: ${{ inputs.operations_per_run }}
+          days-before-issue-stale: ${{ inputs.days_before_contribution_issue_stale }}
+          days-before-issue-close: ${{ inputs.days_before_contribution_issue_close }}
+          stale-issue-label: ${{ inputs.stale_label }}
+          close-issue-reason: not_planned
+          any-of-labels: ${{ inputs.contribution_labels }}
+          labels-to-remove-when-unstale: ${{ inputs.contribution_labels }}
+          stale-issue-message: ${{ inputs.stale_contribution_issue_message }}
+          close-issue-message: ${{ inputs.close_contribution_issue_message }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
