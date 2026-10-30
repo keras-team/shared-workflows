@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "github_repo": "keras-team/keras-hub",
+  "default_branch": "master",
+  "release_branch_pattern": "^r(\\d+)\\.(\\d+)$",
+  "tag_prefix": "v",
+  "version_files": ["keras_hub/src/version.py"],
+  "packages": ["keras-hub", "keras-nlp"],
+  "import_names": ["keras_hub", "keras_nlp"],
+  "build_setup_command": "pip install -r requirements.txt",
+  "build_command": "python pip_build.py",
+  "dist_dirs": ["dist/", "keras_nlp/dist/"],
+  "dev_suffix_on_master": ".dev0",
+  "smoke_snippet": "import keras_hub, keras_nlp; print(keras_hub.__version__)",
+  "backends": ["tensorflow", "jax", "torch"],
+  "legacy_publish_workflow": "publish-to-pypi.yml"
+}
