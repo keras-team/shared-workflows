@@ -1,0 +1,555 @@
+name: 'Publish'
+# Trusted publisher. Builds the tag's commit in a secret-free job, smoke-tests
+# the wheels, runs Gemini-generated tests, then uploads to PyPI through the
+# `pypi` environment's trusted publisher. Dispatched by release.yml, or by a
+# human with write on the target repo. Repeat-safe: validate re-checks,
+# the upload skips files already on PyPI, and post-publish checks digests.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Which repo to publish (must be enabled in release/repos/).'
+        required: true
+        type: choice
+        options:
+          - 'keras'
+          - 'keras-hub'
+          - 'keras-rs'
+          - 'kinetic'
+      tag:
+        description: 'Tag of a published (non-draft) GitHub release, e.g. v0.33.0.'
+        required: true
+        type: string
+      override_generated_tests:
+        description: 'Upload even if the generated tests fail. The smoke install/import test always blocks.'
+        required: false
+        type: boolean
+        default: false
+      requested_by:
+        description: 'Set by the release panel. Ignored unless the release App dispatched this run.'
+        required: false
+        type: string
+        default: ''
+
+# Parsed by the release panel's same-branch run lock.
+run-name: 'publish ${{ inputs.repository }} ${{ inputs.tag }}'
+
+permissions:
+  contents: 'read'
+
+# Inputs reach scripts only through the environment.
+env:
+  PUBLISH_REPOSITORY: '${{ inputs.repository }}'
+  PUBLISH_TAG: '${{ inputs.tag }}'
+  PUBLISH_OVERRIDE_GENERATED_TESTS: '${{ inputs.override_generated_tests }}'
+  PUBLISH_REQUESTED_BY: '${{ inputs.requested_by }}'
+
+jobs:
+  validate:
+    # Holds the App key (env release-read, main only); runs no target code.
+    runs-on: 'ubuntu-latest'
+    environment: 'release-read'
+    permissions:
+      contents: 'read'
+    outputs:
+      sha: '${{ steps.validate.outputs.sha }}'
+      version: '${{ steps.validate.outputs.version }}'
+    steps:
+      - name: 'Check out shared-workflows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Resolve target repo'
+        id: 'target'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { loadConfig, targetRepo } = require('./scripts/release/lib/config.js');
+            const config = loadConfig(process.env.PUBLISH_REPOSITORY, process.env.GITHUB_WORKSPACE);
+            const [owner, name] = targetRepo(config, context.repo.owner).split('/');
+            core.setOutput('owner', owner);
+            core.setOutput('name', name);
+
+      - name: 'Mint read-only App token for the target repo'
+        id: 'app-token'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: '${{ secrets.RELEASE_APP_CLIENT_ID }}'
+          private-key: '${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
+          owner: '${{ steps.target.outputs.owner }}'
+          repositories: '${{ steps.target.outputs.name }}'
+          permission-metadata: 'read'
+          permission-contents: 'read'
+
+      - name: 'Validate actor, tag, release and version files'
+        id: 'validate'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PUBLISH_TRIGGERING_ACTOR: '${{ github.triggering_actor }}'
+          PUBLISH_TARGET_OWNER: '${{ steps.target.outputs.owner }}'
+          PUBLISH_TARGET_NAME: '${{ steps.target.outputs.name }}'
+          RELEASE_APP_SLUG: '${{ vars.RELEASE_APP_SLUG }}'
+        with:
+          github-token: '${{ steps.app-token.outputs.token }}'
+          script: |
+            const { main } = require('./scripts/release/validate_publish.js');
+            await main({ github, context, core, env: process.env });
+
+  resolve:
+    needs: 'validate'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    outputs:
+      target: '${{ steps.config.outputs.target }}'
+      tag_prefix: '${{ steps.config.outputs.tag_prefix }}'
+      build_setup_command: '${{ steps.config.outputs.build_setup_command }}'
+      build_command: '${{ steps.config.outputs.build_command }}'
+      smoke_snippet: '${{ steps.config.outputs.smoke_snippet }}'
+      dist_dirs: '${{ steps.config.outputs.dist_dirs }}'
+      packages: '${{ steps.config.outputs.packages }}'
+      import_names: '${{ steps.config.outputs.import_names }}'
+      backends: '${{ steps.config.outputs.backends }}'
+    steps:
+      - name: 'Check out shared-workflows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Load repo config'
+        id: 'config'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { loadConfig, targetRepo } = require('./scripts/release/lib/config.js');
+            const config = loadConfig(process.env.PUBLISH_REPOSITORY, process.env.GITHUB_WORKSPACE);
+            core.setOutput('target', targetRepo(config, context.repo.owner));
+            for (const key of ['tag_prefix', 'build_setup_command', 'build_command', 'smoke_snippet']) {
+              core.setOutput(key, config[key] || '');
+            }
+            for (const key of ['dist_dirs', 'packages', 'import_names', 'backends']) {
+              core.setOutput(key, JSON.stringify(config[key]));
+            }
+
+  build:
+    # Runs target repo code: no secrets, no environment, read-only token.
+    needs:
+      - 'validate'
+      - 'resolve'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    outputs:
+      digests: '${{ steps.digests.outputs.digests }}'
+    steps:
+      - name: 'Check out target at the validated commit'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: '${{ needs.resolve.outputs.target }}'
+          ref: '${{ needs.validate.outputs.sha }}'
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 'Set up Python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: 'Build setup'
+        env:
+          BUILD_SETUP_COMMAND: '${{ needs.resolve.outputs.build_setup_command }}'
+        run: |
+          if [ -n "$BUILD_SETUP_COMMAND" ]; then
+            bash -euo pipefail -c "$BUILD_SETUP_COMMAND"
+          fi
+
+      - name: 'Build'
+        env:
+          BUILD_COMMAND: '${{ needs.resolve.outputs.build_command }}'
+        run: bash -euo pipefail -c "$BUILD_COMMAND"
+
+      - name: 'Record sha256 digests and stage the dist artifact'
+        id: 'digests'
+        env:
+          DIST_DIRS: '${{ needs.resolve.outputs.dist_dirs }}'
+        shell: python
+        run: |
+          import hashlib, json, os, shutil
+          staging = os.path.join(os.environ["RUNNER_TEMP"], "dist-artifact")
+          digests = {}
+          for dist_dir in json.loads(os.environ["DIST_DIRS"]):
+              rel = dist_dir.strip("/")
+              os.makedirs(os.path.join(staging, rel), exist_ok=True)
+              for name in sorted(os.listdir(rel)):
+                  src = os.path.join(rel, name)
+                  if not os.path.isfile(src) or os.path.islink(src):
+                      raise SystemExit(f"{src} is not a regular file")
+                  shutil.copyfile(src, os.path.join(staging, rel, name))
+                  with open(src, "rb") as f:
+                      digests[f"{rel}/{name}"] = hashlib.sha256(f.read()).hexdigest()
+          if not digests:
+              raise SystemExit("The build produced no files in dist_dirs")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("digests=" + json.dumps(digests, sort_keys=True) + "\n")
+          print(json.dumps(digests, indent=2, sort_keys=True))
+
+      - name: 'Upload dist'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 'dist'
+          path: '${{ runner.temp }}/dist-artifact'
+          if-no-files-found: 'error'
+
+  smoke:
+    # No checkout: installs the built wheels into a fresh venv only.
+    needs:
+      - 'resolve'
+      - 'build'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: '${{ fromJSON(needs.resolve.outputs.backends) }}'
+    steps:
+      - name: 'Download dist'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: 'dist'
+          path: 'dist-artifact'
+
+      - name: 'Set up Python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: 'Install all wheels in one pip command and import from site-packages'
+        env:
+          BACKEND: '${{ matrix.backend }}'
+          DIST_DIRS: '${{ needs.resolve.outputs.dist_dirs }}'
+          IMPORT_NAMES: '${{ needs.resolve.outputs.import_names }}'
+          SMOKE_SNIPPET: '${{ needs.resolve.outputs.smoke_snippet }}'
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/venv"
+          venv_py="$RUNNER_TEMP/venv/bin/python"
+          case "$BACKEND" in
+            tensorflow) "$venv_py" -m pip install tensorflow-cpu ;;
+            jax) "$venv_py" -m pip install 'jax[cpu]' ;;
+            torch) "$venv_py" -m pip install torch --index-url https://download.pytorch.org/whl/cpu ;;
+            *) echo "::error::Unknown backend $BACKEND"; exit 1 ;;
+          esac
+          python -I -c '
+          import glob, json, os
+          for d in json.loads(os.environ["DIST_DIRS"]):
+              found = sorted(glob.glob(os.path.join("dist-artifact", d, "*.whl")))
+              if not found:
+                  raise SystemExit(f"no wheel in {d}")
+              for p in found:
+                  print(os.path.abspath(p))
+          ' > "$RUNNER_TEMP/wheels.txt"
+          mapfile -t wheels < "$RUNNER_TEMP/wheels.txt"
+          "$venv_py" -m pip install "${wheels[@]}"
+          cd "$RUNNER_TEMP"
+          KERAS_BACKEND="$BACKEND" "$venv_py" -I -c '
+          import importlib, json, os
+          exec(os.environ["SMOKE_SNIPPET"])
+          for name in json.loads(os.environ["IMPORT_NAMES"]):
+              path = getattr(importlib.import_module(name), "__file__", None) or ""
+              if "site-packages" not in path:
+                  raise SystemExit(f"{name} was imported from {path!r}, not site-packages")
+              print(f"{name} imported from {path}")
+          '
+
+  generate:
+    # Holds GEMINI_API (env gemini, main only) in one step; runs no target code.
+    needs:
+      - 'validate'
+      - 'resolve'
+    runs-on: 'ubuntu-latest'
+    environment: 'gemini'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Check out target with history'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: '${{ needs.resolve.outputs.target }}'
+          ref: '${{ needs.validate.outputs.sha }}'
+          path: 'target'
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: 'Check out shared-workflows'
+        # No repository: override, so this is the running commit (github.sha).
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: 'sw'
+          persist-credentials: false
+
+      - name: 'Set up Python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: 'Find the previous release tag'
+        id: 'prev'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PUBLISH_VERSION: '${{ needs.validate.outputs.version }}'
+          TAG_PREFIX: '${{ needs.resolve.outputs.tag_prefix }}'
+        with:
+          script: |
+            const { execFileSync } = require('node:child_process');
+            const { previousReleaseTag } = require('./sw/scripts/release/lib/version.js');
+            const pep440 = require('./sw/scripts/release/lib/pep440.js');
+            const prefix = process.env.TAG_PREFIX;
+            const out = execFileSync('git', ['-C', 'target', '-c', 'core.hooksPath=/dev/null', 'tag', '--list', `${prefix}*`], { encoding: 'utf8' });
+            const versions = out.split('\n').filter(Boolean).map((t) => t.slice(prefix.length)).filter((v) => {
+              try { pep440.parse(v); return true; } catch { return false; }
+            });
+            const previous = previousReleaseTag(process.env.PUBLISH_VERSION, versions, prefix);
+            core.info(`Previous release tag: ${previous || '(none; diffing the whole tree)'}`);
+            core.setOutput('tag', previous || '');
+
+      - name: 'Generate tests with Gemini'
+        env:
+          GEMINI_API_KEY: '${{ secrets.GEMINI_API }}'
+          TARGET_DIR: 'target'
+          BASE_REF: '${{ steps.prev.outputs.tag }}'
+          HEAD_REF: '${{ needs.validate.outputs.sha }}'
+          OUTPUT_DIR: 'generated'
+          PUBLISH_VERSION: '${{ needs.validate.outputs.version }}'
+          PACKAGES: '${{ needs.resolve.outputs.packages }}'
+          IMPORT_NAMES: '${{ needs.resolve.outputs.import_names }}'
+        run: python -I sw/scripts/release/py/generate_test.py
+
+      - name: 'Upload generated tests'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: 'generated-tests'
+          path: 'generated'
+          if-no-files-found: 'error'
+
+  generated-tests:
+    # Runs Gemini-written code: no secrets, no checkout.
+    needs:
+      - 'resolve'
+      - 'build'
+      - 'generate'
+    if: always() && needs.build.result == 'success'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: '${{ fromJSON(needs.resolve.outputs.backends) }}'
+    steps:
+      - name: 'Require a successful generate job'
+        # A Gemini outage becomes a generated-tests failure, which
+        # override_generated_tests can cover.
+        env:
+          GENERATE_RESULT: '${{ needs.generate.result }}'
+        run: |
+          if [ "$GENERATE_RESULT" != "success" ]; then
+            echo "::error::The generate job finished with '$GENERATE_RESULT', so there are no generated tests to run."
+            exit 1
+          fi
+
+      - name: 'Download dist'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: 'dist'
+          path: 'dist-artifact'
+
+      - name: 'Download generated tests'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: 'generated-tests'
+          path: 'generated'
+
+      - name: 'Set up Python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: 'Install all wheels in one pip command and run the generated tests'
+        env:
+          BACKEND: '${{ matrix.backend }}'
+          DIST_DIRS: '${{ needs.resolve.outputs.dist_dirs }}'
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/venv"
+          venv_py="$RUNNER_TEMP/venv/bin/python"
+          case "$BACKEND" in
+            tensorflow) "$venv_py" -m pip install tensorflow-cpu ;;
+            jax) "$venv_py" -m pip install 'jax[cpu]' ;;
+            torch) "$venv_py" -m pip install torch --index-url https://download.pytorch.org/whl/cpu ;;
+            *) echo "::error::Unknown backend $BACKEND"; exit 1 ;;
+          esac
+          python -I -c '
+          import glob, json, os
+          for d in json.loads(os.environ["DIST_DIRS"]):
+              found = sorted(glob.glob(os.path.join("dist-artifact", d, "*.whl")))
+              if not found:
+                  raise SystemExit(f"no wheel in {d}")
+              for p in found:
+                  print(os.path.abspath(p))
+          ' > "$RUNNER_TEMP/wheels.txt"
+          mapfile -t wheels < "$RUNNER_TEMP/wheels.txt"
+          "$venv_py" -m pip install "${wheels[@]}" 'pytest==8.3.5'
+          cp -R generated "$RUNNER_TEMP/generated-run"
+          cd "$RUNNER_TEMP/generated-run"
+          KERAS_BACKEND="$BACKEND" "$venv_py" -m pytest -p no:cacheprovider -q .
+
+  upload:
+    # The only job with id-token: write and the pypi environment.
+    needs:
+      - 'validate'
+      - 'resolve'
+      - 'build'
+      - 'smoke'
+      - 'generated-tests'
+    if: always() && github.repository == 'keras-team/shared-workflows' && github.ref == 'refs/heads/main' && needs.validate.result == 'success' && needs.build.result == 'success' && needs.smoke.result == 'success' && (needs.generated-tests.result == 'success' || (inputs.override_generated_tests == true && needs.generated-tests.result == 'failure'))
+    runs-on: 'ubuntu-latest'
+    environment: 'pypi'
+    permissions:
+      id-token: 'write'
+      contents: 'read'
+    outputs:
+      manifest: '${{ steps.split.outputs.manifest }}'
+    env:
+      DIST_DIRS: '${{ needs.resolve.outputs.dist_dirs }}'
+      PACKAGES: '${{ needs.resolve.outputs.packages }}'
+      PUBLISH_VERSION: '${{ needs.validate.outputs.version }}'
+      TAG_PREFIX: '${{ needs.resolve.outputs.tag_prefix }}'
+    steps:
+      - name: 'Check out shared-workflows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: 'sw'
+          persist-credentials: false
+
+      - name: 'Set up Python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: 'Download dist'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: 'dist'
+          path: 'dist-artifact'
+
+      - name: 'Recheck sha256 against the build job'
+        env:
+          DIGESTS: '${{ needs.build.outputs.digests }}'
+        run: python -I sw/scripts/release/py/validate_dist.py digests --root dist-artifact --dist-dirs "$DIST_DIRS" --digests "$DIGESTS"
+
+      - name: 'Validate METADATA / PKG-INFO and filenames'
+        run: python -I sw/scripts/release/py/validate_dist.py metadata --root dist-artifact --dist-dirs "$DIST_DIRS" --packages "$PACKAGES" --tag "$PUBLISH_TAG" --tag-prefix "$TAG_PREFIX"
+
+      - name: 'Set aside files already on PyPI'
+        id: 'split'
+        run: python -I sw/scripts/release/py/split_existing.py --root dist-artifact --existing-dir dist-existing --dist-dirs "$DIST_DIRS" --packages "$PACKAGES" --version "$PUBLISH_VERSION"
+
+      - name: 'Upload dist_dirs[0] (keras-hub first)'
+        if: steps.split.outputs.upload_dir_0 != ''
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: '${{ steps.split.outputs.upload_dir_0 }}'
+          skip-existing: true
+
+      - name: 'Upload dist_dirs[1]'
+        if: steps.split.outputs.upload_dir_1 != ''
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: '${{ steps.split.outputs.upload_dir_1 }}'
+          skip-existing: true
+
+  post-publish:
+    needs:
+      - 'validate'
+      - 'resolve'
+      - 'build'
+      - 'upload'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Check out shared-workflows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: 'sw'
+          persist-credentials: false
+
+      - name: 'Set up Python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: 'Poll PyPI and check digests of the files this run uploaded'
+        env:
+          MANIFEST: '${{ needs.upload.outputs.manifest }}'
+          DIGESTS: '${{ needs.build.outputs.digests }}'
+          PACKAGES: '${{ needs.resolve.outputs.packages }}'
+          PUBLISH_VERSION: '${{ needs.validate.outputs.version }}'
+        run: python -I sw/scripts/release/py/post_publish.py --manifest "$MANIFEST" --digests "$DIGESTS" --packages "$PACKAGES" --version "$PUBLISH_VERSION"
+
+  report:
+    # No secrets.
+    needs:
+      - 'validate'
+      - 'resolve'
+      - 'build'
+      - 'smoke'
+      - 'generate'
+      - 'generated-tests'
+      - 'upload'
+      - 'post-publish'
+    if: always()
+    runs-on: 'ubuntu-latest'
+    permissions: {}
+    steps:
+      - name: 'Write release report'
+        env:
+          VALIDATE_RESULT: '${{ needs.validate.result }}'
+          BUILD_RESULT: '${{ needs.build.result }}'
+          SMOKE_RESULT: '${{ needs.smoke.result }}'
+          GENERATE_RESULT: '${{ needs.generate.result }}'
+          GENERATED_TESTS_RESULT: '${{ needs.generated-tests.result }}'
+          UPLOAD_RESULT: '${{ needs.upload.result }}'
+          POST_PUBLISH_RESULT: '${{ needs.post-publish.result }}'
+          DIGESTS: '${{ needs.build.outputs.digests }}'
+        run: |
+          {
+            echo "## Publish report: \`${PUBLISH_REPOSITORY}\` \`${PUBLISH_TAG}\`"
+            echo ""
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| validate | ${VALIDATE_RESULT} |"
+            echo "| build | ${BUILD_RESULT} |"
+            echo "| smoke | ${SMOKE_RESULT} |"
+            echo "| generate | ${GENERATE_RESULT} |"
+            echo "| generated-tests | ${GENERATED_TESTS_RESULT} |"
+            echo "| upload | ${UPLOAD_RESULT} |"
+            echo "| post-publish | ${POST_PUBLISH_RESULT} |"
+            echo ""
+            if [ "$PUBLISH_OVERRIDE_GENERATED_TESTS" = "true" ] && [ "$GENERATED_TESTS_RESULT" = "failure" ] && [ "$UPLOAD_RESULT" = "success" ]; then
+              echo "⚠️ override_generated_tests was used: the upload went ahead although the generated tests failed."
+              echo ""
+            fi
+            echo "Build sha256 digests:"
+            echo ""
+            echo '```json'
+            echo "${DIGESTS:-(none: the build job did not finish)}"
+            echo '```'
+            echo ""
+            echo "PyPI digest comparison for uploaded files is in the post-publish job summary."
+          } >> "$GITHUB_STEP_SUMMARY"

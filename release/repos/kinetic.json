@@ -1,0 +1,17 @@
+{
+  "enabled": false,
+  "github_repo": "keras-team/kinetic",
+  "default_branch": "main",
+  "release_branch_pattern": "^r(\\d+)\\.(\\d+)$",
+  "tag_prefix": "v",
+  "version_files": ["pyproject.toml"],
+  "packages": ["keras-kinetic"],
+  "import_names": ["kinetic"],
+  "build_setup_command": "pip install build",
+  "build_command": "python -m build",
+  "dist_dirs": ["dist/"],
+  "dev_suffix_on_master": "",
+  "smoke_snippet": "import kinetic",
+  "backends": ["jax"],
+  "legacy_publish_workflow": "publish-to-pypi.yml"
+}
