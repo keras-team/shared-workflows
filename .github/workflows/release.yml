@@ -1,0 +1,121 @@
+name: 'Release'
+# Release panel for every keras-team repo. Run it from Actions > Release > Run
+# workflow. `prepare` opens the version bump PR on the release branch;
+# `draft-release`, run after that PR is merged, drafts the GitHub release.
+# A person merges the PR and publishes the draft; publishing creates the tag
+# and starts the repo's own PyPI publish workflow. See README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'prepare: open the version bump PR. draft-release: run after that PR is merged to draft the release notes.'
+        required: true
+        type: choice
+        options:
+          - 'prepare'
+          - 'draft-release'
+      repo:
+        description: 'Any keras-team repo, e.g. keras-hub.'
+        required: true
+        type: string
+      release_type:
+        description: 'major: 0.34 to 1.0, new branch from master. minor: 0.34 to 0.35, new branch from master. patch: 0.34.0 to 0.34.1, cherry-picks onto the existing release branch.'
+        required: true
+        type: choice
+        options:
+          - 'major'
+          - 'minor'
+          - 'patch'
+      version:
+        description: 'Leave blank to compute it from release_type and stage, or type your own, e.g. 0.35.0rc1.'
+        required: false
+        type: string
+        default: ''
+      commit:
+        description: 'major/minor only: the master commit to cut the release branch from. Blank means the latest.'
+        required: false
+        type: string
+        default: ''
+      cherry_picks:
+        description: 'patch only: master commit hashes separated by spaces, in any order.'
+        required: false
+        type: string
+        default: ''
+      stage:
+        description: 'final: 0.35.0. dev: 0.35.0.dev0 pre-release.'
+        required: true
+        type: choice
+        options:
+          - 'final'
+          - 'dev'
+      dry_run:
+        description: 'Only print what would happen. Untick to act.'
+        required: false
+        type: boolean
+        default: true
+
+run-name: "${{ inputs.action }} ${{ inputs.repo }} ${{ inputs.version || inputs.release_type }}${{ inputs.dry_run && ' (dry run)' || '' }}"
+
+permissions:
+  contents: 'read'
+
+# One run per target repo at a time. A second click waits for the first; a
+# third replaces the waiting one.
+concurrency:
+  group: 'release-${{ inputs.repo }}'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: 'ubuntu-latest'
+    environment: 'release'
+    steps:
+      - name: 'Check out shared workflows repo'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: '.shared-workflows'
+
+      - name: 'Create App token for the target repo'
+        id: 'app-token'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: '${{ secrets.RELEASE_APP_CLIENT_ID }}'
+          private-key: '${{ secrets.RELEASE_APP_PRIVATE_KEY }}'
+          owner: 'keras-team'
+          repositories: '${{ inputs.repo }}'
+          permission-contents: 'write'
+          permission-pull-requests: 'write'
+          # Needed when a cherry-pick touches .github/workflows.
+          permission-workflows: 'write'
+
+      - name: 'Check out the target repo'
+        # The token is kept so the script can push the release branches.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 'keras-team/${{ inputs.repo }}'
+          token: '${{ steps.app-token.outputs.token }}'
+          fetch-depth: 0
+          persist-credentials: true
+          path: 'target'
+
+      - name: 'Run the release step'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        # Inputs reach the script only through the environment.
+        env:
+          RELEASE_ACTION: '${{ inputs.action }}'
+          RELEASE_REPO: '${{ inputs.repo }}'
+          RELEASE_TYPE: '${{ inputs.release_type }}'
+          RELEASE_VERSION: '${{ inputs.version }}'
+          RELEASE_COMMIT: '${{ inputs.commit }}'
+          RELEASE_CHERRY_PICKS: '${{ inputs.cherry_picks }}'
+          RELEASE_STAGE: '${{ inputs.stage }}'
+          RELEASE_DRY_RUN: '${{ inputs.dry_run }}'
+          RELEASE_ACTOR: '${{ github.triggering_actor }}'
+        with:
+          github-token: '${{ steps.app-token.outputs.token }}'
+          script: |
+            const release = require('./.shared-workflows/scripts/release.js');
+            await release({ github, core, env: process.env, cwd: `${process.env.GITHUB_WORKSPACE}/target` });
